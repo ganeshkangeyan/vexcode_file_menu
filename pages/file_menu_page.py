@@ -250,9 +250,9 @@ class AboutPanel(BasePage):
         expect(self.acknowledgements_link).to_be_visible()
 
     def open_credits_panel(self) -> "CreditsPanel":
-        """Click Acknowledgements. Caller's browser context must be able to
-        receive the CreditsPanel is in-app (no new tab involved here,
-        unlike open_privacy_policy_tab())."""
+        """Click Acknowledgements. Opens the CreditsPanel in-app -- unlike
+        Privacy Policy (clicked directly via privacy_policy_link, which
+        opens a real new browser tab), no new tab is involved here."""
         self.acknowledgements_link.click()
         panel = CreditsPanel(self.page)
         panel.expect_visible()
@@ -323,15 +323,19 @@ class FileMenuPage(BasePage):
 
     @property
     def about_menu_item(self):
+        # Confirmed live (2026-08-26): exact text "About" resolves to
+        # exactly 1 element page-wide, both before and after opening the
+        # File menu -- safe unscoped, same verification standard as
+        # whats_new_menu_item above.
         return self.page.get_by_text("About", exact=True)
 
     @property
     def no_recent_projects_text(self):
-        # NOT YET CONFIRMED against the live app -- Chrome was unreachable
-        # while this was written, so unlike every other locator in this
-        # file, this exact string/element hasn't been inspected in the
-        # real DOM. Best guess based on the reported expected text.
-        # Verify/fix against a real pytest run before trusting it.
+        # Written as a best guess (Chrome was unreachable at the time) but
+        # since confirmed correct: test_open_recent_shows_no_recent_projects_on_fresh_session
+        # (tests/test_open_recent.py), which asserts on this locator via
+        # expect_no_recent_projects(), has passed consistently across every
+        # full-suite run since.
         return self.page.get_by_text("No Recent Projects", exact=True)
 
     # --- Mode indicators ---
