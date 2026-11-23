@@ -11,33 +11,39 @@ Playwright DOM inspection on 2026-08-23. Key findings:
                    to .filterbar because "Sensing" also matches a
                    .blocklyToolboxCategory in the Blockly panel (same page DOM)
   - Active tab:    adds class "active" to the filterbutton div
-  - Project cards: div.sample_file_btn  (94 total in the "All" view)
+  - Project cards: div.sample_file_btn  (count per product: see sites.py)
   - Card name:     div.label inside each card (plain text, no extension)
   - Yellow note:   textarea.blocklyCommentTextarea -- its .value (not
-                   .innerText, which is always empty) contains:
-                       "Project: \\n{name}\\n\\nDescription: \\n...\\n\\nConfiguration:\\n..."
+                   .innerText, which is always empty) starts with the
+                   project name, in one of three formats depending on the
+                   product (confirmed live 2026-10-24):
+                       V5 / EXP:  "Project: \\n{name}\\n\\nDescription: ..."
+                       123 / GO:  "Project: {name} \\n\\nDescription: ..."
+                       IQ:        "Project Name: {name}\\n\\nDescription: ..."
                    The textarea lives in the main document via a Blockly
                    SVG <foreignObject> -- confirmed reachable via
                    page.evaluate() in the main frame context.
+
+The category tabs and card count differ per product and come from the
+SiteConfig (sites.py); everything else here is the same on every product.
 """
 import re
 
 from playwright.sync_api import Page, expect
 
 from pages.base_page import BasePage
+from sites import SiteConfig
 
-
-ALL_CATEGORY_TABS = [
-    "All", "Templates", "Motion", "Drivetrain", "Looks",
-    "Magnet", "Arm", "Events", "Control", "Sensing",
-    "Operators", "Variables", "My Blocks",
-]
-
-EXPECTED_ALL_COUNT = 94
+# "Project:" or "Project Name:", then the name -- on the same line or the next.
+_NOTE_NAME_RE = re.compile(r"^Project(?: Name)?:[ \t]*\n?[ \t]*(\S[^\n]*?)[ \t]*$", re.MULTILINE)
 
 
 class OpenExamplesPage(BasePage):
     BLOCKS_TITLE_TEXT = "Choose a Blocks example project"
+
+    def __init__(self, page: Page, site: SiteConfig):
+        super().__init__(page)
+        self.site = site
 
     @property
     def title(self):
@@ -81,8 +87,8 @@ class OpenExamplesPage(BasePage):
         self.page.wait_for_timeout(500)
 
     def expect_all_category_tabs_present(self):
-        """Assert every known category tab is visible in the filter bar."""
-        for name in ALL_CATEGORY_TABS:
+        """Assert every category tab this product has is visible in the filter bar."""
+        for name in self.site.example_categories:
             expect(self.category_tab(name)).to_be_visible(timeout=5000), \
                 f"Category tab '{name}' not visible in the filter bar"
 
@@ -101,7 +107,38 @@ class OpenExamplesPage(BasePage):
         self.page.wait_for_timeout(800)
 
     def visible_card_count(self) -> int:
+        # The grid shows "Loading..." for a moment after switching tabs --
+        # confirmed (2026-10-24, GO) that counting straight away can see 0
+        # cards in a category that has some. Wait for a card first; a
+        # genuinely empty category still returns 0 after the timeout.
+        try:
+            expect(self.project_cards.first).to_be_visible(timeout=15000)
+        except AssertionError:
+            pass
         return self.project_cards.count()
+
+    def template_names(self) -> set:
+        """Names of the examples under the Templates tab ("" set if the
+        product has no Templates tab). Leaves the "All" tab selected."""
+        if "Templates" not in self.site.example_categories:
+            return set()
+        self.click_category("Templates")
+        self.visible_card_count()  # wait for the grid
+        names = {n.strip() for n in self.project_cards.locator(".label").all_inner_texts()}
+        self.click_category("All")
+        return names
+
+    def index_of_nth_project(self, n: int) -> int:
+        """Index (in the "All" grid) of the n-th example that is a real
+        project rather than a Template. Templates are blank worksheets --
+        confirmed on IQ (2026-10-24) their yellow note starts "Name: / Date:
+        / Class:" with no project name, so the name-match check doesn't
+        apply to them."""
+        templates = self.template_names()
+        self.visible_card_count()  # wait for the "All" grid
+        names = [n.strip() for n in self.project_cards.locator(".label").all_inner_texts()]
+        projects = [i for i, name in enumerate(names) if name not in templates]
+        return projects[n]
 
     def get_card_name(self, index: int) -> str:
         """Read the project name shown below the image for the Nth card (0-based).
@@ -115,7 +152,7 @@ class OpenExamplesPage(BasePage):
         project, wait for the examples browser to close, and return the
         captured name.
 
-        With up to 94 cards on screen, "click the Nth one" is otherwise
+        With up to ~90 cards on screen, "click the Nth one" is otherwise
         impossible for a human watching the browser to follow -- the
         highlight (a thick red outline) plus an explicit pause makes it
         visible which project is about to be opened, before the click
@@ -144,8 +181,7 @@ class OpenExamplesPage(BasePage):
         """Extract the project name from the Blockly workspace comment that
         appears (as a yellow sticky note) after an example project opens.
 
-        Confirmed textarea value format:
-            'Project: \\n{name}\\n\\nDescription: \\n...\\n\\nConfiguration:\\n...'
+        Handles all three per-product formats -- see the module docstring.
 
         Uses page.evaluate() against the main frame document -- confirmed
         reachable there even though the Blockly canvas is in a same-page
@@ -155,15 +191,15 @@ class OpenExamplesPage(BasePage):
             "() => { const t = document.querySelector('textarea.blocklyCommentTextarea');"
             " return t ? t.value : ''; }"
         )
-        if "Project: \n" not in value:
-            return ""
-        return value.split("Project: \n")[1].split("\n\n")[0].strip()
+        match = _NOTE_NAME_RE.search(value.replace("\r\n", "\n"))
+        return match.group(1).strip() if match else ""
 
     def expect_yellow_note_with_project_name(self):
         """Assert the yellow workspace comment is present and has a populated
         project-name field after opening an example project."""
         name = self.get_yellow_note_project_name()
         assert name, (
-            "Expected a yellow workspace comment with 'Project: \\n{name}' after "
-            "opening an example, but the textarea was empty or missing that format."
+            "Expected a yellow workspace comment starting 'Project: {name}' (or "
+            "'Project Name: {name}') after opening an example, but the textarea "
+            "was empty or missing that format."
         )

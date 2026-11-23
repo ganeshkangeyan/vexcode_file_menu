@@ -40,12 +40,11 @@ silently clicking the wrong element.
 import pytest
 
 from pages import save_mock
-from pages.file_menu_page import SAVE_EXTENSIONS
 
 pytestmark = pytest.mark.save
 
 
-def test_save_new_project_updates_name_and_status(file_menu, project_name):
+def test_save_new_project_updates_name_and_status(file_menu, project_name, site):
     # 31 -- default toolbar name
     file_menu.expect_project_name("VEXcode Project")
 
@@ -60,7 +59,7 @@ def test_save_new_project_updates_name_and_status(file_menu, project_name):
     file_menu.expect_saved_status("Not Saving")
 
     # 34 -- File > Save opens the (mocked) native save picker directly
-    expected_name = f"{project_name}{SAVE_EXTENSIONS['blocks']}"
+    expected_name = f"{project_name}{site.extensions['blocks']}"
     save_mock.set_filename(file_menu.page, expected_name)
     file_menu.save_current_project()
 

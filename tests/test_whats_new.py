@@ -12,9 +12,10 @@ Confirmed test plan (live-verified against the real app, 2026-08-23):
 
 Note: this is the exact same dialog the app can also auto-show on load
 (gated by a v5version localStorage flag) -- see
-BasePage.dismiss_whats_new_if_present(), which every test already relies on
-via wait_until_loaded() to keep that auto-popup from blocking the first
-real interaction. This test triggers it deliberately via the menu instead.
+BasePage.auto_dismiss_whats_new(), which every test already relies on via
+wait_until_loaded() to keep that auto-popup from blocking interactions.
+This test triggers it deliberately via the menu instead, so
+open_whats_new() switches the auto-close off first.
 """
 import pytest
 

@@ -45,7 +45,6 @@ Locator status:
     the real app using this selector.
   - File > Open Examples: skipped (see below) -- UI never inspected live.
 """
-import json
 from pathlib import Path
 
 import pytest
@@ -54,19 +53,9 @@ from pages import open_mock
 
 pytestmark = pytest.mark.open_recent
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
-# All 6 real fixtures, in the order tests open them -- oldest first. Used
-# to exercise the "keep last 5 / evict oldest" rule with genuinely
-# distinct files rather than renamed duplicates.
-FIXTURE_1 = FIXTURES_DIR / "Printing Lines and Shapes.v5blocks"
-FIXTURE_2 = FIXTURES_DIR / "Changing Velocities.v5python"
-FIXTURE_3 = FIXTURES_DIR / "Complex Decisions (AND OR NOT).v5cpp"
-FIXTURE_4 = FIXTURES_DIR / "Exampleproject3.v5blocks"
-FIXTURE_5 = FIXTURES_DIR / "Printing Text.v5blocks"
-FIXTURE_6 = FIXTURES_DIR / "Using Sensors and Loops.v5blocks"
-
-ALL_SIX_FIXTURES = [FIXTURE_1, FIXTURE_2, FIXTURE_3, FIXTURE_4, FIXTURE_5, FIXTURE_6]
+# Each site lists 6 distinct real fixtures, oldest first (sites.py ->
+# SiteConfig.recent_fixtures). Used to exercise the "keep last 5 / evict
+# oldest" rule with genuinely distinct files rather than renamed duplicates.
 
 
 def _open_via_file_open(file_menu, fixture_path: Path):
@@ -96,7 +85,7 @@ def test_open_recent_shows_no_recent_projects_on_fresh_session(file_menu):
 
 # --- File > Open populates Open Recent ---------------------------------
 
-def test_file_open_adds_project_to_recent_list(file_menu):
+def test_file_open_adds_project_to_recent_list(file_menu, site):
     """Opening a file via File > Open should make it appear in Open Recent.
 
     We seed IndexedDB directly (open_mock.seed_recent_projects) because
@@ -104,23 +93,28 @@ def test_file_open_adds_project_to_recent_list(file_menu):
     open-tracking code path -- see module docstring for the full
     explanation. The test still exercises the Open Recent menu display.
     """
-    _open_via_file_open(file_menu, FIXTURE_1)
-    open_mock.seed_recent_projects(file_menu.page, [FIXTURE_1])
+    first = site.recent_fixture_paths()[0]
+    _open_via_file_open(file_menu, first)
+    open_mock.seed_recent_projects(file_menu.page, [first])
 
     file_menu.open_recent_menu()
-    file_menu.expect_recent_projects([FIXTURE_1.stem])
+    file_menu.expect_recent_projects([first.stem])
 
 
-def test_open_recent_keeps_last_5_evicts_oldest(file_menu):
+def test_open_recent_keeps_last_5_evicts_oldest(file_menu, site):
     """Open Recent caps at 5 entries; the oldest is evicted when a 6th
     file is opened. Seeded directly (see module docstring) with the 5
-    most-recently-opened of the 6 fixtures, oldest (FIXTURE_1) excluded,
-    matching what the app would have stored after 6 real opens."""
-    for fixture in ALL_SIX_FIXTURES:
+    most-recently-opened of the 6 fixtures, oldest excluded, matching what
+    the app would have stored after 6 real opens."""
+    all_six = site.recent_fixture_paths()
+    assert len(all_six) == 6, f"{site.product} needs 6 recent fixtures in sites.py"
+    oldest = all_six[0]
+
+    for fixture in all_six:
         _open_via_file_open(file_menu, fixture)
-    # Seed only the 5 most recent (FIXTURE_2..FIXTURE_6), oldest-first so
-    # seed_recent_projects reverses them to newest-first in the store.
-    open_mock.seed_recent_projects(file_menu.page, ALL_SIX_FIXTURES[1:])
+    # Seed only the 5 most recent, oldest-first so seed_recent_projects
+    # reverses them to newest-first in the store.
+    open_mock.seed_recent_projects(file_menu.page, all_six[1:])
 
     file_menu.open_recent_menu()
     names = file_menu.recent_project_names()
@@ -128,51 +122,44 @@ def test_open_recent_keeps_last_5_evicts_oldest(file_menu):
     assert len(names) == 5, (
         f"Expected Open Recent to show 5 entries, got {len(names)}: {names}"
     )
-    assert FIXTURE_1.stem not in names, (
-        f"Expected the oldest ({FIXTURE_1.stem!r}) to be absent after "
+    assert oldest.stem not in names, (
+        f"Expected the oldest ({oldest.stem!r}) to be absent after "
         f"6 files opened, but it's still listed: {names}"
     )
-    expected = {f.stem for f in ALL_SIX_FIXTURES[1:]}
+    expected = {f.stem for f in all_six[1:]}
     assert set(names) == expected, (
         f"Expected: {sorted(expected)}\nGot: {sorted(names)}"
     )
 
 
-def test_open_recent_entry_reopens_correct_project(file_menu):
+def test_open_recent_entry_reopens_correct_project(file_menu, site):
     """Clicking an Open Recent entry reopens that exact project.
 
     Confirmed mechanism (from pathData: {} in real records): clicking an
     entry calls showOpenFilePicker() again -- our mock intercepts it.
-    We pre-configure set_file() with FIXTURE_2's content before clicking,
-    so the mock returns the right file when the picker fires. Uses the
-    same exact-content check as test_open.py to prove the right file
-    loaded.
+    We pre-configure set_file() with the target fixture's content before
+    clicking, so the mock returns the right file when the picker fires.
+    Uses the same exact-content check as test_open.py to prove the right
+    file loaded.
     """
-    _open_via_file_open(file_menu, FIXTURE_2)  # Python fixture
-    _open_via_file_open(file_menu, FIXTURE_1)  # switch away
-    open_mock.seed_recent_projects(file_menu.page, [FIXTURE_2, FIXTURE_1])
+    first, target = site.recent_fixture_paths()[:2]
+    _open_via_file_open(file_menu, target)
+    _open_via_file_open(file_menu, first)  # switch away
+    open_mock.seed_recent_projects(file_menu.page, [target, first])
 
     # Pre-configure the mock for the picker that fires on clicking the entry.
-    open_mock.set_file(
-        file_menu.page,
-        FIXTURE_2.name,
-        FIXTURE_2.read_text(encoding="utf-8"),
-    )
+    content = target.read_text(encoding="utf-8")
+    open_mock.set_file(file_menu.page, target.name, content)
 
     file_menu.open_recent_menu()
-    dialog = file_menu.open_recent_project(FIXTURE_2.stem)
+    dialog = file_menu.open_recent_project(target.stem)
     assert dialog is None, (
         "Unexpected unsaved-changes prompt reopening from Open Recent"
     )
 
-    file_menu.expect_project_opened(FIXTURE_2.stem, "python")
-
-    fixture_project = json.loads(FIXTURE_2.read_text(encoding="utf-8"))
-    expected_text = fixture_project["textContent"]
-    loaded_text = file_menu.get_editor_full_text()
-    assert loaded_text.replace("\r\n", "\n").strip() == expected_text.replace("\r\n", "\n").strip(), (
-        "Reopening from Open Recent didn't load the exact right file's content"
-    )
+    mode = site.mode_for_file(target)
+    file_menu.expect_project_opened(target.stem, mode)
+    file_menu.expect_content_matches_fixture(content, mode)
 
 
 # --- Open Examples must NOT pollute Open Recent -----------------------------

@@ -5,3 +5,4 @@ pytest-cache-files-*/
 archive/
 output.json
 *_report.html
+reports/
