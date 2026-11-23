@@ -35,7 +35,6 @@ import json
 import pytest
 
 from pages import save_mock
-from pages.file_menu_page import SAVE_EXTENSIONS
 
 pytestmark = pytest.mark.unsaved_changes
 
@@ -58,13 +57,13 @@ def test_new_blocks_project_discard_clears_unsaved_blocks_change(file_menu):
     file_menu.expect_blocks_mode()
 
 
-def test_new_blocks_project_save_writes_dynamic_filename_for_blocks(file_menu, project_name):
+def test_new_blocks_project_save_writes_dynamic_filename_for_blocks(file_menu, project_name, site):
     file_menu.add_unsaved_blocks_change()
 
     dialog = file_menu.new_blocks_project()
     assert dialog is not None
 
-    expected_name = f"{project_name}{SAVE_EXTENSIONS['blocks']}"
+    expected_name = f"{project_name}{site.extensions['blocks']}"
     save_mock.set_filename(file_menu.page, expected_name)
     dialog.save()
 
@@ -96,22 +95,34 @@ def test_new_blocks_project_save_writes_dynamic_filename_for_blocks(file_menu, p
     # text field to a unique value and greps for it in workspace_xml.
     assert workspace_xml.count("<block") >= 1, "Expected at least one serialized block"
 
-    # Original call still asked for the .v5blocks type -- confirms we didn't
-    # accidentally save a Python/C++ project instead.
+    # Original call still asked for this product's blocks extension --
+    # confirms we didn't accidentally save a Python/C++ project instead.
     calls = save_mock.get_calls(file_menu.page)
-    assert SAVE_EXTENSIONS["blocks"] in str(calls[0])
+    assert site.extensions["blocks"] in str(calls[0])
 
     file_menu.expect_blocks_mode()
 
 
-# --- Python -------------------------------------------------------------
+# --- Python / C++ ---------------------------------------------------------
+# Same flow for each text language; a language the product doesn't have
+# (C++ on GO, both on 123) is skipped via the requires() marker.
 
-def test_new_blocks_project_discard_clears_unsaved_python_change(file_menu):
-    dialog = file_menu.new_text_project()
-    dialog.choose_python()
-    file_menu.expect_text_mode("python")
+TEXT_MARKERS = {"python": PYTHON_MARKER, "cpp": CPP_MARKER}
 
-    file_menu.add_unsaved_text_change()
+text_languages = pytest.mark.parametrize(
+    "language",
+    [
+        pytest.param("python", marks=pytest.mark.requires("python")),
+        pytest.param("cpp", marks=pytest.mark.requires("cpp")),
+    ],
+)
+
+
+@text_languages
+def test_new_blocks_project_discard_clears_unsaved_text_change(file_menu, language):
+    file_menu.start_text_project(language)
+
+    file_menu.add_unsaved_text_change(TEXT_MARKERS[language])
 
     prompt = file_menu.new_blocks_project()
     assert prompt is not None, "Expected the Save/Discard prompt to appear"
@@ -120,17 +131,17 @@ def test_new_blocks_project_discard_clears_unsaved_python_change(file_menu):
     file_menu.expect_blocks_mode()
 
 
-def test_new_blocks_project_save_writes_dynamic_filename_for_python(file_menu, project_name):
-    dialog = file_menu.new_text_project()
-    dialog.choose_python()
-    file_menu.expect_text_mode("python")
+@text_languages
+def test_new_blocks_project_save_writes_dynamic_filename_for_text(file_menu, project_name, site, language):
+    file_menu.start_text_project(language)
 
-    file_menu.add_unsaved_text_change()  # types PYTHON_MARKER by default
+    marker = TEXT_MARKERS[language]
+    file_menu.add_unsaved_text_change(marker)
 
     prompt = file_menu.new_blocks_project()
     assert prompt is not None
 
-    expected_name = f"{project_name}{SAVE_EXTENSIONS['python']}"
+    expected_name = f"{project_name}{site.extensions[language]}"
     save_mock.set_filename(file_menu.page, expected_name)
     prompt.save()
 
@@ -140,59 +151,12 @@ def test_new_blocks_project_save_writes_dynamic_filename_for_python(file_menu, p
     assert len(saved) == 1
     assert saved[0]["name"] == expected_name
     assert saved[0]["content"]
-    assert PYTHON_MARKER in saved[0]["content"], (
+    assert marker in saved[0]["content"], (
         "Saved content doesn't contain the edit we made -- looks like stale "
         "or wrong project data was saved"
     )
 
     calls = save_mock.get_calls(file_menu.page)
-    assert SAVE_EXTENSIONS["python"] in str(calls[0])
-
-    file_menu.expect_blocks_mode()
-
-
-# --- C++ ------------------------------------------------------------------
-
-def test_new_blocks_project_discard_clears_unsaved_cpp_change(file_menu):
-    dialog = file_menu.new_text_project()
-    dialog.choose_cpp()
-    file_menu.expect_text_mode("cpp")
-
-    file_menu.add_unsaved_text_change(CPP_MARKER)
-
-    prompt = file_menu.new_blocks_project()
-    assert prompt is not None, "Expected the Save/Discard prompt to appear"
-
-    prompt.discard()
-    file_menu.expect_blocks_mode()
-
-
-def test_new_blocks_project_save_writes_dynamic_filename_for_cpp(file_menu, project_name):
-    dialog = file_menu.new_text_project()
-    dialog.choose_cpp()
-    file_menu.expect_text_mode("cpp")
-
-    file_menu.add_unsaved_text_change(CPP_MARKER)
-
-    prompt = file_menu.new_blocks_project()
-    assert prompt is not None
-
-    expected_name = f"{project_name}{SAVE_EXTENSIONS['cpp']}"
-    save_mock.set_filename(file_menu.page, expected_name)
-    prompt.save()
-
-    file_menu.expect_no_save_error()
-
-    saved = save_mock.get_saved_files(file_menu.page)
-    assert len(saved) == 1
-    assert saved[0]["name"] == expected_name
-    assert saved[0]["content"]
-    assert CPP_MARKER in saved[0]["content"], (
-        "Saved content doesn't contain the edit we made -- looks like stale "
-        "or wrong project data was saved"
-    )
-
-    calls = save_mock.get_calls(file_menu.page)
-    assert SAVE_EXTENSIONS["cpp"] in str(calls[0])
+    assert site.extensions[language] in str(calls[0])
 
     file_menu.expect_blocks_mode()

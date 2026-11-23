@@ -1,6 +1,20 @@
-# VEXcode V5 — File Menu Regression Suite
+# VEXcode — File Menu Regression Suite
 
-Playwright + pytest, Page Object Model. Targets prod: `https://codev5.vex.com/`.
+Playwright + pytest, Page Object Model. One shared set of tests for the File
+menu of every VEXcode web product:
+
+| Site | Product |
+|---|---|
+| `https://codev5.vex.com/` (default) | VEXcode V5 |
+| `https://code123.vex.com/` | VEXcode 123 |
+| `https://codego.vex.com/` | VEXcode GO |
+| `https://codeexp.vex.com/` | VEXcode EXP |
+| `https://codeiq.vex.com/` | VEXcode IQ |
+
+The test steps are the same on every product; what differs (file
+extensions, which text languages exist, the Open Examples catalog, fixture
+files) lives in per-site settings in [`sites.py`](sites.py) — see
+"Per-site settings" below.
 
 ## Setup
 
@@ -15,8 +29,17 @@ playwright install chromium
 pytest
 ```
 
-Runs headed Chromium by default (set in `conftest.py`). To run headless, edit
-`browser_type_launch_args` in `conftest.py` and set `"headless": True`.
+Runs headed Chromium by default. `VEX_HEADLESS=1` switches to headless, but
+**headless does not currently work against the live VEX sites**: they sit
+behind Cloudflare bot protection, which serves headless Chrome a "Performing
+security verification" page instead of the app (confirmed 2026-10-16 — every
+test errors in setup waiting for the File menu). Run headed (on a Linux CI
+agent, under a virtual display such as `xvfb-run`), or ask the VEX web team
+to allow-list the test runner's traffic in Cloudflare. Do not try to
+disguise headless Chrome to get past the check.
+
+`VEX_SLOWMO=<ms>` sets the pause between actions (default 500 ms so a human
+can follow along; use `VEX_SLOWMO=1` for unattended runs).
 
 Target a different environment (e.g. staging) without editing files:
 
@@ -24,20 +47,67 @@ Target a different environment (e.g. staging) without editing files:
 pytest --base-url=https://staging.codev5.vex.com/
 ```
 
-Run the whole suite against multiple VEX product sites in one command (they
-share this File menu design, so nothing in `pages/` or `tests/` is specific
-to codev5.vex.com):
+Run against another product, or several at once:
 
 ```bash
-pytest --sites="https://codev5.vex.com/,https://codeexp.vex.com/"
+pytest --base-url=https://codeiq.vex.com/
+pytest --sites="https://codev5.vex.com/,https://code123.vex.com/,https://codego.vex.com/,https://codeexp.vex.com/,https://codeiq.vex.com/"
 # or
 VEX_SITES="https://codev5.vex.com/,https://codeexp.vex.com/" pytest
 ```
 
-Every test runs once per site automatically (e.g.
+With `--sites`, every test runs once per site automatically (e.g.
 `test_new_blocks_project_resets_to_blank_blocks_canvas[https://codeexp.vex.com/-chromium]`).
 With zero or one site given, this is a no-op and `--base-url` behaves
 exactly as before.
+
+## Per-site settings
+
+[`sites.py`](sites.py) has one `SiteConfig` per product. Every value in it
+was captured from the live site, not guessed:
+
+| | V5 | 123 | GO | EXP | IQ |
+|---|---|---|---|---|---|
+| Blocks file | `.v5blocks` | `.123blocks` | `.goblocks` | `.expblocks` | `.iqblocks` |
+| Python | `.v5python` | — | `.gopython` | `.exppython` | `.iqpython` |
+| C++ | `.v5cpp` | — | — | `.expcpp` | `.iqcpp` |
+| New Text Project | language dialog | not in menu | straight to Python | dialog, then *EXP Brain* | dialog |
+| Examples (tabs / projects) | 13 / 94 | 11 / 17 | 12 / 26 | 14 / 80 | 12 / 75 |
+
+Tests for a feature a product doesn't have are **skipped, not failed**, via
+the `requires` marker — e.g. `@pytest.mark.requires("cpp")` skips on 123 and
+GO with "VEXcode GO has no 'cpp'". Available features: `python`, `cpp`,
+`text` (any text language), `language_dialog`, `examples_tab:<name>`.
+
+Tests read per-site data through the `site` fixture
+(`site.extensions["blocks"]`, `site.fixture("python")`, ...) and
+`FileMenuPage` follows each product's own New Text Project flow via
+`file_menu.start_text_project("python")`.
+
+### Fixture files per site
+
+Each product only opens its own file types, so each has its own real project
+files in `tests/fixtures/<key>/` (`v5/`, `123/`, `go/`, `exp/`, `iq/`). The
+V5 ones were exported by hand; the others were produced by the app itself
+with:
+
+```bash
+python tools/capture_fixtures.py https://codeiq.vex.com/
+```
+
+It opens built-in examples and new text projects and saves them through the
+suite's save mock (nothing is saved on the site), then writes a
+`manifest.json` that `sites.py` reads. Re-run it if VEX changes a product's
+project format.
+
+### Adding a new site
+
+1. Add a `SiteConfig` to `SITES` in `sites.py` (open the site and check its
+   extensions, New Text Project flow and Open Examples tabs).
+2. `python tools/capture_fixtures.py https://<new site>/`
+3. Run the suite with `--base-url=https://<new site>/`.
+
+No test code changes needed.
 
 Give Save-flow tests a specific filename instead of the timestamped default:
 
@@ -163,7 +233,9 @@ in Jenkins even without further wiring.
 ## Project layout
 
 ```
-conftest.py                    # fixtures: browser/page, project_name, file_menu
+conftest.py                    # fixtures: browser/page, project_name, site, file_menu
+sites.py                       # per-site settings (extensions, languages, examples, fixtures)
+tools/capture_fixtures.py      # captures real fixture files from a site
 pages/
   base_page.py                  # shared BasePage (wait_until_loaded)
   file_menu_page.py             # FileMenuPage, NewProjectLanguageDialog,
@@ -174,7 +246,7 @@ tests/
   test_file_menu.py             # New Project regression tests
   test_new_project_unsaved_changes.py  # Discard/Save prompt tests
   test_open.py                  # File > Open tests
-  fixtures/                     # real .v5blocks/.v5python/.v5cpp files used by test_open.py
+  fixtures/<site>/              # real project files per product, used by test_open.py / test_open_recent.py
 ```
 
 ## Locator strategy

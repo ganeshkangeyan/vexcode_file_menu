@@ -7,14 +7,16 @@ window.showOpenFilePicker(), the browser's native, un-automatable OS file
 picker. Intercepted the same way Save is, via open_mock (pages/open_mock.py)
 installed in the file_menu fixture (conftest.py).
 
-Fixtures: three real, user-provided VEXcode V5 project files (not
-hand-crafted) living in tests/fixtures/, one per project type -- these were
-actually exported from the app, so opening them exercises the real JSON
-project envelope format (mode/textContent-or-workspace/robotConfig/etc.),
-not a guessed shape:
+Fixtures: one real project file per project type the product supports,
+exported from the app itself (not hand-crafted), so opening them exercises
+the real JSON project envelope format (mode/textContent-or-workspace/
+robotConfig/etc.), not a guessed shape. They live in tests/fixtures/<site>/
+and are listed per site in sites.py -- e.g. for V5:
   - Printing Lines and Shapes.v5blocks
   - Changing Velocities.v5python
   - Complex Decisions (AND OR NOT).v5cpp
+Each product only accepts its own extensions (.123blocks, .goblocks,
+.iqpython, ...) -- a V5 file is "Unsupported project" on IQ.
 
 Test cases, matching the plan confirmed with the user before writing any of
 this:
@@ -59,119 +61,48 @@ stronger:
 Both are implemented as `FileMenuPage.get_blocks_workspace_xml()` /
 `get_editor_full_text()` -- see file_menu_page.py for the full detail.
 """
-import json
-import re
-from pathlib import Path
-
 import pytest
 
 from pages import open_mock
 
 pytestmark = pytest.mark.open
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
-BLOCKS_FIXTURE = FIXTURES_DIR / "Printing Lines and Shapes.v5blocks"
-PYTHON_FIXTURE = FIXTURES_DIR / "Changing Velocities.v5python"
-CPP_FIXTURE = FIXTURES_DIR / "Complex Decisions (AND OR NOT).v5cpp"
-
 GARBAGE_CONTENT = '{"not": "a real vexcode project"}'
 
 
-def _block_type_sequence(workspace_xml: str) -> list:
-    """Every <block type="..."> / <shadow type="..."> in document order --
-    a structural fingerprint of a Blockly workspace's exact content.
-    Order-preserving and format-agnostic (doesn't care about attribute
-    ordering or whitespace differences between the source file's XML and
-    whatever the app re-serializes), unlike a raw string comparison."""
-    return re.findall(r'<(?:block|shadow) type="([^"]+)"', workspace_xml)
+# --- Successful opens, one per project type -------------------------------
 
+@pytest.mark.parametrize("mode", [
+    "blocks",
+    pytest.param("python", marks=pytest.mark.requires("python")),
+    pytest.param("cpp", marks=pytest.mark.requires("cpp")),
+])
+def test_open_project_loads_fixture(file_menu, site, mode):
+    fixture = site.fixture(mode)
+    content = fixture.read_text(encoding="utf-8")
+    open_mock.set_file(file_menu.page, fixture.name, content)
 
-def _normalize_text(text: str) -> str:
-    """Normalize line endings and trailing whitespace before comparing
-    clipboard-read editor content against a fixture's raw JSON string --
-    avoids false failures from \\r\\n vs \\n or a trailing newline that
-    don't reflect an actual content mismatch."""
-    return text.replace("\r\n", "\n").strip()
-
-
-def _open_fixture(file_menu, fixture_path: Path):
     dialog = file_menu.open_project()
     assert dialog is None, (
         "Expected File > Open to proceed directly (no unsaved changes on a "
         "fresh project) but got the Save/Discard prompt instead"
     )
 
+    file_menu.expect_project_opened(fixture.stem, mode)
 
-# --- Successful opens, one per project type -------------------------------
-
-def test_open_blocks_project_loads_fixture(file_menu):
-    content = BLOCKS_FIXTURE.read_text(encoding="utf-8")
-    open_mock.set_file(file_menu.page, BLOCKS_FIXTURE.name, content)
-
-    _open_fixture(file_menu, BLOCKS_FIXTURE)
-
-    file_menu.expect_project_opened(BLOCKS_FIXTURE.stem, "blocks")
-
-    # Exact-content check: read the actual loaded Blockly workspace back
-    # via the app's own Blockly API and compare its full block-type
-    # sequence against the source fixture's workspace XML -- proves the
-    # specific blocks that loaded match the specific file we opened, not
-    # just that "some blocks" are present.
-    fixture_project = json.loads(content)
-    expected_types = _block_type_sequence(fixture_project["workspace"])
-    loaded_types = _block_type_sequence(file_menu.get_blocks_workspace_xml())
-    assert loaded_types == expected_types, (
-        "Loaded workspace's block sequence doesn't match the fixture "
-        f"file's -- wrong file may have loaded.\nExpected: {expected_types}\n"
-        f"Got: {loaded_types}"
-    )
-    assert len(loaded_types) > 0, "Sanity check: fixture should contain real blocks"
+    # Exact-content check: the full Blockly block sequence (blocks) or the
+    # full editor text via clipboard (python/cpp) must match the fixture --
+    # not just "some blocks"/a marker line.
+    file_menu.expect_content_matches_fixture(content, mode)
 
     calls = open_mock.get_calls(file_menu.page)
     assert len(calls) == 1
 
 
-def test_open_python_project_loads_fixture(file_menu):
-    content = PYTHON_FIXTURE.read_text(encoding="utf-8")
-    open_mock.set_file(file_menu.page, PYTHON_FIXTURE.name, content)
-
-    _open_fixture(file_menu, PYTHON_FIXTURE)
-
-    file_menu.expect_project_opened(PYTHON_FIXTURE.stem, "python")
-
-    # Exact-content check: full editor text via clipboard, compared against
-    # the fixture's own textContent field -- not a substring/marker.
-    fixture_project = json.loads(content)
-    expected_text = fixture_project["textContent"]
-    loaded_text = file_menu.get_editor_full_text()
-    assert _normalize_text(loaded_text) == _normalize_text(expected_text), (
-        "Editor content doesn't exactly match the fixture file's source -- "
-        "wrong file may have loaded, or content was truncated/corrupted"
-    )
-
-
-def test_open_cpp_project_loads_fixture(file_menu):
-    content = CPP_FIXTURE.read_text(encoding="utf-8")
-    open_mock.set_file(file_menu.page, CPP_FIXTURE.name, content)
-
-    _open_fixture(file_menu, CPP_FIXTURE)
-
-    file_menu.expect_project_opened(CPP_FIXTURE.stem, "cpp")
-
-    fixture_project = json.loads(content)
-    expected_text = fixture_project["textContent"]
-    loaded_text = file_menu.get_editor_full_text()
-    assert _normalize_text(loaded_text) == _normalize_text(expected_text), (
-        "Editor content doesn't exactly match the fixture file's source -- "
-        "wrong file may have loaded, or content was truncated/corrupted"
-    )
-
-
 # --- Error / edge cases -----------------------------------------------------
 
-def test_open_unsupported_project_shows_error_and_leaves_project_untouched(file_menu):
-    open_mock.set_file(file_menu.page, "garbage.v5blocks", GARBAGE_CONTENT)
+def test_open_unsupported_project_shows_error_and_leaves_project_untouched(file_menu, site):
+    open_mock.set_file(file_menu.page, f"garbage{site.extensions['blocks']}", GARBAGE_CONTENT)
 
     dialog = file_menu.open_project()
     assert dialog is None
@@ -195,11 +126,15 @@ def test_open_cancel_leaves_project_untouched(file_menu):
     file_menu.expect_blocks_mode()
 
 
-def test_open_with_unsaved_changes_prompts_then_loads_requested_file(file_menu):
+def test_open_with_unsaved_changes_prompts_then_loads_requested_file(file_menu, site):
     file_menu.add_unsaved_blocks_change()
 
-    content = PYTHON_FIXTURE.read_text(encoding="utf-8")
-    open_mock.set_file(file_menu.page, PYTHON_FIXTURE.name, content)
+    # A text project where the product has one (proves the mode switches
+    # too); blocks-only products (123) open their blocks fixture instead.
+    mode = site.text_languages[0] if site.text_languages else "blocks"
+    fixture = site.fixture(mode)
+    content = fixture.read_text(encoding="utf-8")
+    open_mock.set_file(file_menu.page, fixture.name, content)
 
     dialog = file_menu.open_project()
     assert dialog is not None, (
@@ -209,12 +144,5 @@ def test_open_with_unsaved_changes_prompts_then_loads_requested_file(file_menu):
 
     dialog.discard()
 
-    file_menu.expect_project_opened(PYTHON_FIXTURE.stem, "python")
-
-    fixture_project = json.loads(content)
-    expected_text = fixture_project["textContent"]
-    loaded_text = file_menu.get_editor_full_text()
-    assert _normalize_text(loaded_text) == _normalize_text(expected_text), (
-        "Editor content doesn't exactly match the fixture file's source "
-        "after the Discard-then-Open flow"
-    )
+    file_menu.expect_project_opened(fixture.stem, mode)
+    file_menu.expect_content_matches_fixture(content, mode)

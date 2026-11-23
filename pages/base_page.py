@@ -25,7 +25,7 @@ class BasePage:
     def __init__(self, page: Page):
         self.page = page
 
-    def highlight_and_click(self, locator, color: str = "red", pause_ms: int = 400):
+    def highlight_and_click(self, locator, color: str = "red", pause_ms: int = 400, timeout=None):
         """Click `locator`, but first draw a thick colored outline around it
         and pause briefly so a human watching a headed/--slowmo run (or a
         recording) can actually see which element the test just chose --
@@ -45,7 +45,7 @@ class BasePage:
         except Exception:
             pass  # purely cosmetic -- never let a highlight failure block the click
         self.page.wait_for_timeout(pause_ms)
-        locator.click()
+        locator.click(timeout=timeout)
         try:
             locator.evaluate(
                 "(el) => { el.style.outline = el.dataset.vexPrevOutline || '';"
@@ -54,17 +54,33 @@ class BasePage:
         except Exception:
             pass
 
-    def dismiss_whats_new_if_present(self):
-        whats_new = self.page.locator(self.WHATS_NEW_ROOT_SELECTOR)
-        try:
-            expect(whats_new).to_be_visible(timeout=3000)
-        except AssertionError:
-            return  # didn't show this run -- nothing to do
-        whats_new.get_by_role("button", name="Close", exact=True).click()
-        expect(whats_new).not_to_be_visible(timeout=5000)
+    @property
+    def whats_new_popup(self):
+        return self.page.locator(self.WHATS_NEW_ROOT_SELECTOR)
+
+    def _close_whats_new(self):
+        self.whats_new_popup.get_by_role("button", name="Close", exact=True).click()
+
+    def auto_dismiss_whats_new(self):
+        """Close the auto-shown What's New popup whenever it appears, not
+        just if it's there in the first few seconds. Confirmed (2026-10-24,
+        V5/EXP/IQ): on a slow load it can pop up well after the app looks
+        ready, then blocks every click for the rest of the test. Playwright
+        checks for it before each action/assertion and closes it first.
+        Turned off again by open_whats_new(), which opens the same dialog
+        on purpose."""
+        self.page.add_locator_handler(self.whats_new_popup, self._close_whats_new)
+
+    def stop_auto_dismissing_whats_new(self):
+        self.page.remove_locator_handler(self.whats_new_popup)
 
     def wait_until_loaded(self):
-        """Wait for the app shell to finish booting, dismissing the
-        What's New dialog first if it showed up on this load."""
-        self.dismiss_whats_new_if_present()
-        expect(self.page.get_by_text("File", exact=True)).to_be_visible(timeout=15000)
+        """Wait for the app shell to finish booting, with the What's New
+        popup auto-closed whenever it shows up (now or later in the test).
+
+        Don't also close it by hand here: confirmed (2026-10-24) that a
+        manual Close click while the handler is registered races it -- the
+        handler fires first, closes the popup, and the manual click then
+        waits 30s for a Close button that's gone."""
+        self.auto_dismiss_whats_new()
+        expect(self.page.get_by_text("File", exact=True)).to_be_visible(timeout=30000)

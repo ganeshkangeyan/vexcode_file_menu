@@ -1,5 +1,7 @@
 """
-Page objects for VEXcode V5's File menu, covering:
+Page objects for the VEXcode File menu (shared by V5, 123, GO, EXP and IQ --
+per-product differences come from the SiteConfig passed to FileMenuPage,
+see sites.py), covering:
   - File > New Blocks Project
   - File > New Text Project  (-> Select a Project Language dialog: Python / C++ / Cancel)
   - The "Your project was never saved. Save now?" Discard/Save prompt that
@@ -23,18 +25,18 @@ what's visually rendered; CSS text-transform made "Download" look like
 "DOWNLOAD" on screen, for example, which is what broke the first version of
 this locator).
 """
+import json
+import re
+import time
+
 from playwright.sync_api import Page, expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from pages.base_page import BasePage
+from sites import SiteConfig
 
-# Real file extensions used by File > Save / Save As, confirmed by
-# intercepting window.showSaveFilePicker() on the live app for each project
-# type (see README "How the Save mock works").
-SAVE_EXTENSIONS = {
-    "blocks": ".v5blocks",
-    "python": ".v5python",
-    "cpp": ".v5cpp",
-}
+# Button text on the "Select a Project Language" dialog, per mode.
+LANGUAGE_BUTTONS = {"python": "Python", "cpp": "C++"}
 
 
 class NewProjectLanguageDialog(BasePage):
@@ -76,11 +78,13 @@ class NewProjectLanguageDialog(BasePage):
     def expect_visible(self):
         expect(self.title).to_be_visible(timeout=5000)
 
-    def choose_python(self):
-        self.python_card.click()
-
-    def choose_cpp(self):
-        self.cpp_card.click()
+    def choose(self, language: str, project_type: "str | None" = None):
+        """Pick "python" or "cpp". Some products then ask a second question
+        in the same modal ("Select a Project Type" on EXP: EXP Brain /
+        6-Axis Arm) -- pass the button to pick as project_type."""
+        self.root.get_by_role("button", name=LANGUAGE_BUTTONS[language], exact=True).click()
+        if project_type:
+            self.root.get_by_role("button", name=project_type, exact=True).click()
 
     def cancel(self):
         self.cancel_button.click()
@@ -100,6 +104,13 @@ class UnsavedChangesDialog(BasePage):
 
     MESSAGE_TEXT = "Your project was never saved. Save now?"
     MODAL_ROOT_SELECTOR = ".prompt_window"
+
+    def __init__(self, page: Page, then=None):
+        """then: called after Discard/Save -- for the rest of the action
+        that was interrupted (e.g. EXP's "Select a Project Type" question
+        that follows on New Blocks Project)."""
+        super().__init__(page)
+        self.then = then
 
     @property
     def root(self):
@@ -126,6 +137,8 @@ class UnsavedChangesDialog(BasePage):
 
     def discard(self):
         self.discard_button.click()
+        if self.then:
+            self.then()
 
     def save(self):
         """Click Save. The real app opens a native OS Save-As dialog here
@@ -133,11 +146,13 @@ class UnsavedChangesDialog(BasePage):
         see the save_picker_mock fixture in conftest.py, which must be
         installed *before* calling this so the native dialog never opens."""
         self.save_button.click()
+        if self.then:
+            self.then()
 
 
 class WhatsNewDialog(BasePage):
     """The 'VEXcode V5 - What's New' panel, opened via File > What's New
-    (same dialog auto-shown on load -- see BasePage.dismiss_whats_new_if_present).
+    (same dialog auto-shown on load -- see BasePage.auto_dismiss_whats_new).
 
     Confirmed live (2026-08-23): centered on screen inside a
     .vca_lightbox.flex_row.active modal wrapper, root container
@@ -199,10 +214,19 @@ class CreditsPanel(BasePage):
     def expect_visible(self):
         expect(self.root).to_be_visible(timeout=10000)
 
-    def expect_scrollable(self):
-        metrics = self.scroll_container.evaluate(
-            "el => ({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight })"
-        )
+    def expect_scrollable(self, timeout_s: float = 10):
+        # The license list is filled in after the panel opens -- confirmed
+        # (2026-10-24) that reading it immediately can see an empty panel
+        # (scrollHeight == clientHeight == 480) even though it fills to
+        # ~427000px a moment later, so poll instead of reading once.
+        deadline = time.monotonic() + timeout_s
+        while True:
+            metrics = self.scroll_container.evaluate(
+                "el => ({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight })"
+            )
+            if metrics["scrollHeight"] > metrics["clientHeight"] or time.monotonic() > deadline:
+                break
+            self.page.wait_for_timeout(250)
         assert metrics["scrollHeight"] > metrics["clientHeight"], (
             f"Expected the credits panel's content to overflow (be scrollable), got {metrics}"
         )
@@ -260,10 +284,14 @@ class AboutPanel(BasePage):
 
 
 class FileMenuPage(BasePage):
-    # --- Boilerplate markers used to confirm which editor mode is active ---
-    PYTHON_MARKER = "from vex import *"
-    CPP_MARKER = '#include "vex.h"'
+    # Common to every product's text-project boilerplate. The per-language
+    # markers ("from vex import *", "from go import *", ...) are per site --
+    # see SiteConfig.text_markers.
     BOILERPLATE_HEADER = "VEXcode Generated Robot Configuration"
+
+    def __init__(self, page: Page, site: SiteConfig):
+        super().__init__(page)
+        self.site = site
 
     # --- Menu trigger / items ---
     @property
@@ -339,23 +367,22 @@ class FileMenuPage(BasePage):
         return self.page.get_by_text("No Recent Projects", exact=True)
 
     # --- Mode indicators ---
+    # Download (blocks) / Build (text) toolbar buttons only exist on some
+    # products -- 123 and GO have neither (confirmed 2026-10-24) -- so mode
+    # is detected from the editors themselves, which every product has:
+    # the Blockly toolbox in blocks mode, the Monaco editor in text mode.
     @property
     def edit_menu_button(self):
         # Only present in text/code editor mode
         return self.page.get_by_text("Edit", exact=True)
 
     @property
-    def download_button(self):
-        # Only present in blocks mode. Accessible name is "Download"
-        # (mixed case) -- the all-caps look on screen is CSS
-        # text-transform, not the real accessible/DOM text.
-        return self.page.get_by_role("button", name="Download", exact=True)
+    def blocks_toolbox(self):
+        return self.page.locator(".blocklyToolboxDiv")
 
     @property
-    def build_button(self):
-        # Only present in text/code editor mode. Accessible name is "Build"
-        # (mixed case) -- same CSS text-transform trap as Download.
-        return self.page.get_by_role("button", name="Build", exact=True)
+    def code_editor(self):
+        return self.page.locator(".monaco-editor")
 
     @property
     def default_blocks_hat(self):
@@ -388,6 +415,20 @@ class FileMenuPage(BasePage):
         self.file_menu_button.click()
         expect(self.new_blocks_project_item).to_be_visible(timeout=5000)
 
+    def choose_menu_item(self, item):
+        """File > `item`. If the item can't be clicked within 10s, reopen the
+        menu and try once more: confirmed (2026-10-24) the dropdown can
+        close under the test -- when the auto What's New popup is closed
+        while it's open, or when another browser window takes focus -- and
+        then every click on its items just times out."""
+        self.open_menu()
+        try:
+            self.highlight_and_click(item, timeout=10000)
+        except PlaywrightTimeoutError:
+            self.page.keyboard.press("Escape")
+            self.open_menu()
+            self.highlight_and_click(item)
+
     def new_blocks_project(self) -> "UnsavedChangesDialog | None":
         """File > New Blocks Project.
 
@@ -398,12 +439,27 @@ class FileMenuPage(BasePage):
         instead of resetting -- this returns the UnsavedChangesDialog so the
         caller can resolve it (discard() or save()).
         """
-        self.open_menu()
-        self.highlight_and_click(self.new_blocks_project_item)
-        dialog = UnsavedChangesDialog(self.page)
-        return dialog if dialog.is_visible() else None
+        self.choose_menu_item(self.new_blocks_project_item)
+        dialog = UnsavedChangesDialog(self.page, then=self._answer_project_type)
+        if dialog.is_visible():
+            return dialog
+        self._answer_project_type()
+        return None
 
-    def new_text_project(self) -> "NewProjectLanguageDialog | UnsavedChangesDialog":
+    def _answer_project_type(self):
+        """Products with a "Select a Project Type" question (EXP: EXP Brain /
+        6-Axis Arm) ask it on every New Blocks Project, even from a fresh
+        project -- confirmed live 2026-10-24. Pick the site's configured
+        type. No-op on products that don't ask."""
+        choice = self.site.project_type_choice
+        if not choice:
+            return
+        prompt = self.page.locator(".prompt_window", has_text="Select a Project Type")
+        expect(prompt).to_be_visible(timeout=10000)
+        prompt.get_by_role("button", name=choice, exact=True).click()
+        expect(prompt).not_to_be_visible(timeout=10000)
+
+    def new_text_project(self) -> "NewProjectLanguageDialog | UnsavedChangesDialog | None":
         """File > New Text Project.
 
         Normally opens the language-selection dialog directly. If there are
@@ -411,17 +467,34 @@ class FileMenuPage(BasePage):
         returns whichever dialog is actually showing, so callers should
         check the type (or just call .is_visible()-style duck typing) when
         unsaved changes are a possibility.
+
+        On products with a single text language (GO) there is no language
+        dialog -- the text project opens straight away and this returns None.
         """
-        self.open_menu()
-        self.highlight_and_click(self.new_text_project_item)
+        self.choose_menu_item(self.new_text_project_item)
 
         unsaved = UnsavedChangesDialog(self.page)
         if unsaved.is_visible():
             return unsaved
 
+        if not self.site.language_dialog:
+            return None
         dialog = NewProjectLanguageDialog(self.page)
         dialog.expect_visible()
         return dialog
+
+    def start_text_project(self, language: str):
+        """File > New Text Project in `language` ("python"/"cpp"), following
+        whatever steps this product asks for, and wait for the code editor.
+        Assumes there are no unsaved changes (use new_text_project() directly
+        to exercise the Save now? prompt)."""
+        dialog = self.new_text_project()
+        assert not isinstance(dialog, UnsavedChangesDialog), (
+            "Unexpected Save now? prompt -- start_text_project() needs a clean project"
+        )
+        if dialog is not None:
+            dialog.choose(language, self.site.project_type_choice)
+        self.expect_text_mode(language)
 
     def open_project(self) -> "UnsavedChangesDialog | None":
         """File > Open.
@@ -439,8 +512,7 @@ class FileMenuPage(BasePage):
         app a moment to finish loading before asserting on the result (see
         expect_project_opened()).
         """
-        self.open_menu()
-        self.highlight_and_click(self.open_menu_item)
+        self.choose_menu_item(self.open_menu_item)
         dialog = UnsavedChangesDialog(self.page)
         return dialog if dialog.is_visible() else None
 
@@ -448,8 +520,7 @@ class FileMenuPage(BasePage):
         """File > Open Recent. After this, check either
         no_recent_projects_text (empty state) or recent_project_names()
         (populated state) -- see NOT YET CONFIRMED notes on those."""
-        self.open_menu()
-        self.highlight_and_click(self.open_recent_menu_item)
+        self.choose_menu_item(self.open_recent_menu_item)
 
     def open_examples(self):
         """File > Open Examples. Returns an OpenExamplesPage. Unlike
@@ -459,9 +530,8 @@ class FileMenuPage(BasePage):
         it."""
         from pages.open_examples_page import OpenExamplesPage  # local import avoids a circular import at module load time
 
-        self.open_menu()
-        self.highlight_and_click(self.open_examples_menu_item)
-        examples = OpenExamplesPage(self.page)
+        self.choose_menu_item(self.open_examples_menu_item)
+        examples = OpenExamplesPage(self.page, self.site)
         examples.expect_visible()
         return examples
 
@@ -502,8 +572,7 @@ class FileMenuPage(BasePage):
         which must have set_filename() called beforehand so the mock
         reports back the right name (see save_mock.py).
         """
-        self.open_menu()
-        self.highlight_and_click(self.save_menu_item)
+        self.choose_menu_item(self.save_menu_item)
 
     def save_as_current_project(self):
         """File > Save As -- same native-picker mock mechanism as
@@ -516,21 +585,25 @@ class FileMenuPage(BasePage):
         and updates the toolbar name to whatever filename was supplied via
         save_mock.set_filename() beforehand.
         """
-        self.open_menu()
-        self.highlight_and_click(self.save_as_menu_item)
+        self.choose_menu_item(self.save_as_menu_item)
 
     def open_whats_new(self) -> "WhatsNewDialog":
         """File > What's New."""
-        self.open_menu()
-        self.highlight_and_click(self.whats_new_menu_item)
+        # Same dialog as the auto-shown popup. Keep auto-closing on through
+        # the menu clicks (so an auto popup can't block them -- confirmed
+        # 2026-10-24 that it can appear mid-test), and only switch it off
+        # once our click has opened the dialog, so the handler doesn't close
+        # it before the test can look at it. An auto popup arriving after
+        # this point is the same dialog, so the assertions still hold.
+        self.choose_menu_item(self.whats_new_menu_item)
+        self.stop_auto_dismissing_whats_new()
         dialog = WhatsNewDialog(self.page)
         dialog.expect_visible()
         return dialog
 
     def open_about(self) -> "AboutPanel":
         """File > About."""
-        self.open_menu()
-        self.highlight_and_click(self.about_menu_item)
+        self.choose_menu_item(self.about_menu_item)
         panel = AboutPanel(self.page)
         panel.expect_visible()
         return panel
@@ -589,7 +662,7 @@ class FileMenuPage(BasePage):
         showing."""
         # Click into the code editor body, then type at the end.
         # Confirmed the editor is Monaco (.monaco-editor) on the live app.
-        self.page.locator(".monaco-editor").click()
+        self.code_editor.click()
         self.page.keyboard.press("Control+End")
         self.page.keyboard.press("Enter")
         self.page.keyboard.type(snippet)
@@ -606,7 +679,8 @@ class FileMenuPage(BasePage):
     # --- State assertions ---
     def expect_blocks_mode(self):
         """Assert the app is showing the Blockly canvas (blocks-mode UI)."""
-        expect(self.download_button).to_be_visible(timeout=10000)
+        expect(self.blocks_toolbox).to_be_visible(timeout=10000)
+        expect(self.code_editor).not_to_be_visible()
         expect(self.edit_menu_button).not_to_be_visible()
         expect(self.default_blocks_hat).to_be_visible()
 
@@ -614,13 +688,23 @@ class FileMenuPage(BasePage):
         """Assert the app is showing the code editor for the given language.
 
         language: "python" or "cpp"
-        """
-        expect(self.build_button).to_be_visible(timeout=10000)
-        expect(self.edit_menu_button).to_be_visible()
 
-        marker = self.PYTHON_MARKER if language == "python" else self.CPP_MARKER
-        expect(self.page.get_by_text(marker)).to_be_visible()
-        expect(self.page.get_by_text(self.BOILERPLATE_HEADER)).to_be_visible()
+        The boilerplate is checked against the FULL editor text (see
+        get_editor_full_text) rather than get_by_text(): Monaco only renders
+        the lines currently scrolled into view, and on some products the
+        language marker sits below that (confirmed: '#include "vex.h"' on
+        VEXcode IQ C++ wasn't rendered, so get_by_text never found it).
+        """
+        expect(self.code_editor).to_be_visible(timeout=10000)
+        expect(self.edit_menu_button).to_be_visible()
+        expect(self.blocks_toolbox).not_to_be_visible()
+
+        text = self.get_editor_full_text()
+        assert self.BOILERPLATE_HEADER in text, (
+            f"Expected the {self.BOILERPLATE_HEADER!r} boilerplate in the editor"
+        )
+        marker = self.site.text_markers[language]
+        assert marker in text, f"Expected {marker!r} in a fresh {language} project"
 
     def expect_zero_errors(self):
         """Text-mode editor shows an Errors panel with warning/error counts."""
@@ -687,10 +771,41 @@ class FileMenuPage(BasePage):
         Requires the "clipboard-read"/"clipboard-write" permissions
         granted in conftest.py's browser_context_args.
         """
-        self.page.locator(".monaco-editor").click()
+        self.code_editor.click()
         self.page.keyboard.press("Control+a")
         self.page.keyboard.press("Control+c")
         return self.page.evaluate("() => navigator.clipboard.readText()")
+
+    @staticmethod
+    def block_type_sequence(workspace_xml: str) -> list:
+        """Every <block type="..."> / <shadow type="..."> in document order --
+        a structural fingerprint of a Blockly workspace's exact content.
+        Order-preserving and format-agnostic (doesn't care about attribute
+        ordering or whitespace differences between the source file's XML and
+        whatever the app re-serializes), unlike a raw string comparison."""
+        return re.findall(r'<(?:block|shadow) type="([^"]+)"', workspace_xml)
+
+    def expect_content_matches_fixture(self, fixture_content: str, mode: str):
+        """Prove the project that loaded is exactly the fixture file, not
+        just something with the right name: compare the full Blockly block
+        sequence (blocks) or the full editor text (python/cpp) against the
+        fixture's own JSON."""
+        project = json.loads(fixture_content)
+        if mode == "blocks":
+            expected = self.block_type_sequence(project["workspace"])
+            loaded = self.block_type_sequence(self.get_blocks_workspace_xml())
+            assert len(expected) > 0, "Sanity check: fixture should contain real blocks"
+            assert loaded == expected, (
+                "Loaded workspace's block sequence doesn't match the fixture "
+                f"file's -- wrong file may have loaded.\nExpected: {expected}\nGot: {loaded}"
+            )
+        else:
+            def norm(text):
+                return text.replace("\r\n", "\n").strip()
+            assert norm(self.get_editor_full_text()) == norm(project["textContent"]), (
+                "Editor content doesn't exactly match the fixture file's source -- "
+                "wrong file may have loaded, or content was truncated/corrupted"
+            )
 
     def expect_no_recent_projects(self):
         """Assert File > Open Recent shows the empty state. See
@@ -709,21 +824,6 @@ class FileMenuPage(BasePage):
         assert actual == expected, (
             f"Open Recent list mismatch.\nExpected: {sorted(expected)}\n"
             f"Got: {sorted(actual)}"
-        )
-
-    def expect_yellow_notes_visible(self):
-        """After opening a project via File > Open Examples, a Blockly
-        workspace comment (yellow sticky note) appears. Confirmed selector:
-        textarea.blocklyCommentTextarea -- its .value starts with 'Project: '.
-        See OpenExamplesPage.expect_yellow_note_with_project_name() for the
-        richer assertion used by the Open Examples tests directly."""
-        value = self.page.evaluate(
-            "() => { const t = document.querySelector('textarea.blocklyCommentTextarea');"
-            " return t ? t.value : ''; }"
-        )
-        assert "Project: \n" in value, (
-            "Expected a yellow workspace comment containing 'Project: \\n{name}' "
-            "after opening an example project, but it was absent or empty."
         )
 
     def expect_project_opened(self, expected_name: str, mode: str):

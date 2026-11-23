@@ -21,6 +21,7 @@ import pytest
 
 from pages import open_mock, save_mock
 from pages.file_menu_page import FileMenuPage
+from sites import SiteConfig, site_for_url
 
 
 # --- Browser / context configuration -----------------------------------
@@ -34,9 +35,11 @@ def browser_type_launch_args(browser_type_launch_args, pytestconfig):
     # tell "user didn't pass --slowmo" apart from "user passed --slowmo=0"
     # -- if you genuinely want zero delay, use --slowmo=1.
     slow_mo = pytestconfig.getoption("--slowmo") or int(os.environ.get("VEX_SLOWMO", 500))
+    # Headed by default; VEX_HEADLESS=1 runs headless (e.g. Jenkins/CI).
+    headless = os.environ.get("VEX_HEADLESS", "0").lower() in ("1", "true", "yes")
     return {
         **browser_type_launch_args,
-        "headless": False,   # headed Chromium, per current test-plan scope
+        "headless": headless,
         "slow_mo": slow_mo,  # ms pause before every Playwright action -- see --slowmo
     }
 
@@ -132,7 +135,40 @@ def pytest_generate_tests(metafunc):
 # --- App-specific fixtures ------------------------------------------------
 
 @pytest.fixture
-def file_menu(page) -> FileMenuPage:
+def site(base_url) -> SiteConfig:
+    """The per-site settings (extensions, languages, examples, fixtures)
+    for whichever site this test is running against -- see sites.py."""
+    return site_for_url(base_url)
+
+
+def _site_has(site: SiteConfig, feature: str) -> bool:
+    if feature == "language_dialog":
+        return site.language_dialog
+    if feature == "text":
+        return bool(site.text_languages)
+    if feature.startswith("examples_tab:"):
+        return feature.split(":", 1)[1] in site.example_categories
+    return site.supports(feature)  # "blocks" / "python" / "cpp"
+
+
+@pytest.fixture(autouse=True)
+def _skip_unsupported_features(request):
+    """`@pytest.mark.requires("cpp")` etc. skips a test on sites that don't
+    have that feature (e.g. C++ on VEXcode GO, any text project on 123),
+    so the report shows "skipped -- not on this product" instead of a
+    misleading failure."""
+    markers = list(request.node.iter_markers("requires"))
+    if not markers or "base_url" not in request.fixturenames:
+        return
+    site = request.getfixturevalue("site")
+    for m in markers:
+        for feature in m.args:
+            if not _site_has(site, feature):
+                pytest.skip(f"{site.product} has no {feature!r}")
+
+
+@pytest.fixture
+def file_menu(page, site) -> FileMenuPage:
     """
     Installs the native Save- and Open-dialog mocks, navigates to the
     target site (whichever `base_url` resolved to -- see
@@ -142,8 +178,11 @@ def file_menu(page) -> FileMenuPage:
     """
     save_mock.install(page)  # must happen BEFORE goto -- see pages/save_mock.py
     open_mock.install(page)  # ditto -- see pages/open_mock.py
-    page.goto("/")
-    fmp = FileMenuPage(page)
+    # 60s, not Playwright's default 30s: these are heavy apps, and a busy
+    # machine (several sites in parallel) regularly needed more than 30s
+    # just to load -- confirmed 2026-10-24.
+    page.goto("/", timeout=60000)
+    fmp = FileMenuPage(page, site)
     fmp.wait_until_loaded()
     return fmp
 
