@@ -93,6 +93,17 @@ def pytest_addoption(parser):
              "need to be verified across multiple VEX product sites that "
              "share this UI.",
     )
+    parser.addoption(
+        "--site",
+        action="store",
+        default=None,
+        help="Which VEXcode product the site under test is: v5, 123, go, exp "
+             "or iq. Falls back to the VEX_SITE env var. Only needed for a "
+             "test build whose URL doesn't show it (e.g. "
+             "codev5-staging.vex.com, an IP, a preview host) -- production "
+             "hosts and their subdomains (staging.codev5.vex.com) are "
+             "recognised automatically.",
+    )
 
 
 @pytest.fixture
@@ -135,10 +146,12 @@ def pytest_generate_tests(metafunc):
 # --- App-specific fixtures ------------------------------------------------
 
 @pytest.fixture
-def site(base_url) -> SiteConfig:
+def site(base_url, pytestconfig) -> SiteConfig:
     """The per-site settings (extensions, languages, examples, fixtures)
-    for whichever site this test is running against -- see sites.py."""
-    return site_for_url(base_url)
+    for whichever site this test is running against -- see sites.py.
+    --site / VEX_SITE overrides the product for a test-build URL."""
+    override = pytestconfig.getoption("--site") or os.environ.get("VEX_SITE")
+    return site_for_url(base_url, override)
 
 
 def _site_has(site: SiteConfig, feature: str) -> bool:
@@ -195,8 +208,8 @@ def pytest_runtest_makereport(item, call):
     showing at the moment of failure and embed it directly in the
     pytest-html report (run with --html=report.html --self-contained-html).
 
-    Only fires for the "call" phase (the actual test body, not setup/
-    teardown) and only when the test failed -- a passing test gets no
+    Fires for the setup and "call" phases (fixture setup, e.g. the site
+    loading, and the test body -- not teardown) and only when they failed -- a passing test gets no
     screenshot, keeping the report small. Reads the `page` fixture straight
     out of the failed test's own funcargs, so this works for every test
     using the `file_menu`/`page` fixtures without each test needing to do
@@ -205,7 +218,10 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
-    if report.when != "call" or not report.failed:
+    # Setup too: a site that never finished loading (slow, or a Cloudflare
+    # check page) fails in the file_menu fixture, and the picture is the
+    # quickest way to tell which.
+    if report.when not in ("setup", "call") or not report.failed:
         return
 
     page = item.funcargs.get("page")

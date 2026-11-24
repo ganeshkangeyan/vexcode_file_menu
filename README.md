@@ -41,11 +41,62 @@ disguise headless Chrome to get past the check.
 `VEX_SLOWMO=<ms>` sets the pause between actions (default 500 ms so a human
 can follow along; use `VEX_SLOWMO=1` for unattended runs).
 
-Target a different environment (e.g. staging) without editing files:
+## Running against a test build
+
+Point `--base-url` at the build -- nothing else in the suite is tied to
+production:
 
 ```bash
 pytest --base-url=https://staging.codev5.vex.com/
 ```
+
+The suite also needs to know *which product* the build is, to load its
+settings from `sites.py`. A production host or any subdomain of it
+(`staging.codev5.vex.com`, `test.code123.vex.com`) is recognised
+automatically. For any other URL, name the product with `--site` (or the
+`VEX_SITE` env var) -- one of `v5`, `123`, `go`, `exp`, `iq`:
+
+```bash
+pytest --base-url=https://codev5-staging.vex.com/ --site=v5
+VEX_SITE=iq pytest --base-url=http://10.0.0.5:8080/
+```
+
+Without it, an unrecognised URL stops the run straight away with a message
+saying to pass `--site`.
+
+### Are the test build's examples the same as production?
+
+`tests/test_examples_baseline.py` opens File > Open Examples on the build
+under test, reads every tab and every example name, and compares them with
+`tests/fixtures/<site>/examples.json` -- a snapshot of production's
+catalog. On a difference it fails and lists exactly what changed:
+
+```
+VEXcode 123 examples differ from the production baseline (https://code123.vex.com/, captured 2026-11-25):
+  Tab missing: 'Motion' (1 examples)
+  All: missing 'Fake Release Example'
+  Sensing: missing 'Old Name Example'
+  Sensing: added 'Avoiding Obstacles'
+```
+
+(Order on screen is ignored.) A difference on a test build may be intended
+-- e.g. new examples for the upcoming release -- so read the list, don't
+just re-run. The comparison uses a saved snapshot rather than opening
+production in the same run, so the pipeline doesn't depend on production
+being reachable, and results are repeatable.
+
+**Refresh the snapshot from production after each release goes live:**
+
+```bash
+python tools/capture_examples.py https://codev5.vex.com/ https://code123.vex.com/ https://codego.vex.com/ https://codeexp.vex.com/ https://codeiq.vex.com/
+```
+
+It's read-only (opens the examples browser, reads the cards). It also warns
+if production's tabs or "All" count no longer match `example_categories` /
+`example_count` in `sites.py`, which the other Open Examples tests use --
+update those by hand when it does. Commit the updated `examples.json` files.
+
+Run only this check with `pytest tests/test_examples_baseline.py`.
 
 Run against another product, or several at once:
 
@@ -105,7 +156,8 @@ project format.
 1. Add a `SiteConfig` to `SITES` in `sites.py` (open the site and check its
    extensions, New Text Project flow and Open Examples tabs).
 2. `python tools/capture_fixtures.py https://<new site>/`
-3. Run the suite with `--base-url=https://<new site>/`.
+3. `python tools/capture_examples.py https://<new site>/`
+4. Run the suite with `--base-url=https://<new site>/`.
 
 No test code changes needed.
 
@@ -187,34 +239,74 @@ in this suite:**
   fixture content checks) are still Chromium/Edge-only until a
   non-clipboard fallback is written for other engines.
 
-## Jenkins / CI invocation
+## Jenkins
 
-Combine site, marker, and browser selection into one command a Jenkins job
-parameterizes (e.g. string parameters `SITES`, `SUITE`, `BROWSER`):
+The repo has a ready `Jenkinsfile`. It sets up Python and calls
+`tools/run_ci.py`, which runs the selected sites **one after another** and
+writes one report set per site to `reports/`.
+
+### Build parameters
+
+| Parameter | Default (used by the nightly schedule) | Meaning |
+|---|---|---|
+| `SITES` | `all` | `all`, or a comma list of `v5, 123, go, exp, iq` |
+| `TEST_URL` | *(empty)* | A test-build URL to run instead of production. Set `SITES` to exactly that product. |
+| `BROWSER` | `chromium` | `chromium` or `msedge` (Firefox isn't offered: VEXcode refuses to run in it) |
+| `MARKERS` | *(empty = everything)* | A pytest `-m` expression, e.g. `save or save_as` |
+
+The schedule is weekday nights around 1 AM (`cron('H 1 * * 1-5')`) with the
+defaults, so all five production sites in Chromium. A full run takes
+about 1.5 hours.
+
+### Results
+
+- **Test Results** page: every test, prefixed by site (`v5.tests.test_open...`,
+  `iq.tests.test_open...`), so the same test on different sites shows
+  separately, with history across builds.
+- **Build Artifacts**: `reports/<site>.html` (a screenshot embedded for every
+  failure) and `reports/<site>.log` (full pytest output).
+- **Build status**: SUCCESS when everything passed; UNSTABLE when some
+  tests failed; FAILED when a run couldn't happen at all (bad parameter, a
+  marker that matches nothing, Python/browser setup broken).
+
+### One-time setup
+
+1. **Agent.** The browsers must run **headed**, because Cloudflare in front of the VEXcode
+   sites blocks headless Chrome.
+   - *Windows agent*: Python 3.10+ on PATH. Run the Jenkins agent in a
+     logged-in desktop session (e.g. auto-logon + agent started at login),
+     **not** as a Windows service: a service has no desktop to draw the
+     browser on.
+   - *Linux agent*: Python 3.10+, `apt-get install xvfb`, and once as root
+     `python3 -m playwright install-deps chromium`. The Jenkinsfile runs
+     the tests inside `xvfb-run` (a virtual screen) automatically.
+   - For `BROWSER=msedge`, Microsoft Edge must be installed on the agent.
+   - Give that agent the label **`vexcode-ui`** (or change `agent { label ... }`
+     in the Jenkinsfile).
+
+   The alternative to headed runs is asking VEX to allow-list the agent's IP
+   in Cloudflare, then setting `VEX_HEADLESS=1` in the Jenkinsfile's
+   `environment` block. Don't try to disguise headless Chrome as a real
+   browser.
+2. **Job.** New Item → *Pipeline* → "Pipeline script from SCM" → Git, this repo,
+   branch `main`, script path `Jenkinsfile`. Add credentials if the repo is
+   private.
+3. **Parameters.** Click *Build Now* once. Jenkins only learns the parameters
+   and the schedule from the Jenkinsfile after its first run, so that run
+   uses the defaults. *Build with Parameters* appears afterwards.
+
+Plugins used: Pipeline, Git, JUnit (all in Jenkins' suggested set).
+
+### Same thing from a terminal
 
 ```bash
-pytest \
-  -m "${SUITE}" \
-  --sites="${SITES}" \
-  --browser=chromium \
-  --html=report.html --self-contained-html
+python tools/run_ci.py                                    # all sites
+python tools/run_ci.py --sites=v5,iq --markers="save or save_as"
+python tools/run_ci.py --sites=v5 --test-url=https://codev5-staging.vex.com/
+python tools/run_ci.py --browser=msedge
 ```
 
-Example concrete invocations:
-
-```bash
-# Save/Save As only, against two sites, Chromium
-pytest -m save_as --sites="https://codev5.vex.com/,https://code123.vex.com/" \
-  --html=report.html --self-contained-html
-
-# Everything, single site, Edge
-pytest --sites="https://codev5.vex.com/" --browser=chromium \
-  --browser-channel=msedge --html=report.html --self-contained-html
-```
-
-A screenshot is auto-attached to `report.html` for any failing test (see
-`pytest_runtest_makereport` in `conftest.py`) -- useful as a build artifact
-in Jenkins even without further wiring.
+Or call pytest directly, as in the sections above, for one-off runs.
 
 ## What's covered
 
@@ -229,6 +321,10 @@ in Jenkins even without further wiring.
   project types from disk, the "Unsupported project" error on invalid
   content, cancelling the native picker, and the Discard/Save prompt
   interaction when there are unsaved changes.
+- `tests/test_open_examples.py` — File > Open Examples: navigation, category
+  tabs, and the opened project's name matching its card.
+- `tests/test_examples_baseline.py` — every example name in every tab
+  matches the production snapshot (see "Running against a test build").
 
 ## Project layout
 
@@ -236,6 +332,9 @@ in Jenkins even without further wiring.
 conftest.py                    # fixtures: browser/page, project_name, site, file_menu
 sites.py                       # per-site settings (extensions, languages, examples, fixtures)
 tools/capture_fixtures.py      # captures real fixture files from a site
+tools/capture_examples.py      # records production's Open Examples catalog (examples.json)
+tools/run_ci.py                # CI runner used by the Jenkinsfile (sites one by one, per-site reports)
+Jenkinsfile                    # scheduled + parameterized Jenkins pipeline
 pages/
   base_page.py                  # shared BasePage (wait_until_loaded)
   file_menu_page.py             # FileMenuPage, NewProjectLanguageDialog,
@@ -246,7 +345,9 @@ tests/
   test_file_menu.py             # New Project regression tests
   test_new_project_unsaved_changes.py  # Discard/Save prompt tests
   test_open.py                  # File > Open tests
-  fixtures/<site>/              # real project files per product, used by test_open.py / test_open_recent.py
+  test_examples_baseline.py     # test build's examples vs production snapshot
+  fixtures/<site>/              # real project files per product, used by test_open.py / test_open_recent.py,
+                                 # plus examples.json (production's examples catalog)
 ```
 
 ## Locator strategy
