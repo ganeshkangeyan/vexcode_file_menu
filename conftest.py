@@ -93,6 +93,17 @@ def pytest_addoption(parser):
              "need to be verified across multiple VEX product sites that "
              "share this UI.",
     )
+    parser.addoption(
+        "--site",
+        action="store",
+        default=None,
+        help="Which VEXcode product the site under test is: v5, 123, go, exp "
+             "or iq. Falls back to the VEX_SITE env var. Only needed for a "
+             "test build whose URL doesn't show it (e.g. "
+             "codev5-staging.vex.com, an IP, a preview host) -- production "
+             "hosts and their subdomains (staging.codev5.vex.com) are "
+             "recognised automatically.",
+    )
 
 
 @pytest.fixture
@@ -135,10 +146,12 @@ def pytest_generate_tests(metafunc):
 # --- App-specific fixtures ------------------------------------------------
 
 @pytest.fixture
-def site(base_url) -> SiteConfig:
+def site(base_url, pytestconfig) -> SiteConfig:
     """The per-site settings (extensions, languages, examples, fixtures)
-    for whichever site this test is running against -- see sites.py."""
-    return site_for_url(base_url)
+    for whichever site this test is running against -- see sites.py.
+    --site / VEX_SITE overrides the product for a test-build URL."""
+    override = pytestconfig.getoption("--site") or os.environ.get("VEX_SITE")
+    return site_for_url(base_url, override)
 
 
 def _site_has(site: SiteConfig, feature: str) -> bool:

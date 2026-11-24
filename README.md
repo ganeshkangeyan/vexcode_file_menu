@@ -41,11 +41,62 @@ disguise headless Chrome to get past the check.
 `VEX_SLOWMO=<ms>` sets the pause between actions (default 500 ms so a human
 can follow along; use `VEX_SLOWMO=1` for unattended runs).
 
-Target a different environment (e.g. staging) without editing files:
+## Running against a test build
+
+Point `--base-url` at the build -- nothing else in the suite is tied to
+production:
 
 ```bash
 pytest --base-url=https://staging.codev5.vex.com/
 ```
+
+The suite also needs to know *which product* the build is, to load its
+settings from `sites.py`. A production host or any subdomain of it
+(`staging.codev5.vex.com`, `test.code123.vex.com`) is recognised
+automatically. For any other URL, name the product with `--site` (or the
+`VEX_SITE` env var) -- one of `v5`, `123`, `go`, `exp`, `iq`:
+
+```bash
+pytest --base-url=https://codev5-staging.vex.com/ --site=v5
+VEX_SITE=iq pytest --base-url=http://10.0.0.5:8080/
+```
+
+Without it, an unrecognised URL stops the run straight away with a message
+saying to pass `--site`.
+
+### Are the test build's examples the same as production?
+
+`tests/test_examples_baseline.py` opens File > Open Examples on the build
+under test, reads every tab and every example name, and compares them with
+`tests/fixtures/<site>/examples.json` -- a snapshot of production's
+catalog. On a difference it fails and lists exactly what changed:
+
+```
+VEXcode 123 examples differ from the production baseline (https://code123.vex.com/, captured 2026-11-25):
+  Tab missing: 'Motion' (1 examples)
+  All: missing 'Fake Release Example'
+  Sensing: missing 'Old Name Example'
+  Sensing: added 'Avoiding Obstacles'
+```
+
+(Order on screen is ignored.) A difference on a test build may be intended
+-- e.g. new examples for the upcoming release -- so read the list, don't
+just re-run. The comparison uses a saved snapshot rather than opening
+production in the same run, so the pipeline doesn't depend on production
+being reachable, and results are repeatable.
+
+**Refresh the snapshot from production after each release goes live:**
+
+```bash
+python tools/capture_examples.py https://codev5.vex.com/ https://code123.vex.com/ https://codego.vex.com/ https://codeexp.vex.com/ https://codeiq.vex.com/
+```
+
+It's read-only (opens the examples browser, reads the cards). It also warns
+if production's tabs or "All" count no longer match `example_categories` /
+`example_count` in `sites.py`, which the other Open Examples tests use --
+update those by hand when it does. Commit the updated `examples.json` files.
+
+Run only this check with `pytest tests/test_examples_baseline.py`.
 
 Run against another product, or several at once:
 
@@ -105,7 +156,8 @@ project format.
 1. Add a `SiteConfig` to `SITES` in `sites.py` (open the site and check its
    extensions, New Text Project flow and Open Examples tabs).
 2. `python tools/capture_fixtures.py https://<new site>/`
-3. Run the suite with `--base-url=https://<new site>/`.
+3. `python tools/capture_examples.py https://<new site>/`
+4. Run the suite with `--base-url=https://<new site>/`.
 
 No test code changes needed.
 
@@ -210,6 +262,10 @@ pytest -m save_as --sites="https://codev5.vex.com/,https://code123.vex.com/" \
 # Everything, single site, Edge
 pytest --sites="https://codev5.vex.com/" --browser=chromium \
   --browser-channel=msedge --html=report.html --self-contained-html
+
+# A test build whose URL doesn't show the product (Jenkins params BUILD_URL, PRODUCT)
+VEX_SLOWMO=1 pytest --base-url="${BUILD_URL}" --site="${PRODUCT}" \
+  --html=report.html --self-contained-html
 ```
 
 A screenshot is auto-attached to `report.html` for any failing test (see
@@ -229,6 +285,10 @@ in Jenkins even without further wiring.
   project types from disk, the "Unsupported project" error on invalid
   content, cancelling the native picker, and the Discard/Save prompt
   interaction when there are unsaved changes.
+- `tests/test_open_examples.py` — File > Open Examples: navigation, category
+  tabs, and the opened project's name matching its card.
+- `tests/test_examples_baseline.py` — every example name in every tab
+  matches the production snapshot (see "Running against a test build").
 
 ## Project layout
 
@@ -236,6 +296,7 @@ in Jenkins even without further wiring.
 conftest.py                    # fixtures: browser/page, project_name, site, file_menu
 sites.py                       # per-site settings (extensions, languages, examples, fixtures)
 tools/capture_fixtures.py      # captures real fixture files from a site
+tools/capture_examples.py      # records production's Open Examples catalog (examples.json)
 pages/
   base_page.py                  # shared BasePage (wait_until_loaded)
   file_menu_page.py             # FileMenuPage, NewProjectLanguageDialog,
@@ -246,7 +307,9 @@ tests/
   test_file_menu.py             # New Project regression tests
   test_new_project_unsaved_changes.py  # Discard/Save prompt tests
   test_open.py                  # File > Open tests
-  fixtures/<site>/              # real project files per product, used by test_open.py / test_open_recent.py
+  test_examples_baseline.py     # test build's examples vs production snapshot
+  fixtures/<site>/              # real project files per product, used by test_open.py / test_open_recent.py,
+                                 # plus examples.json (production's examples catalog)
 ```
 
 ## Locator strategy

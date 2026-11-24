@@ -73,6 +73,12 @@ class SiteConfig:
     def recent_fixture_paths(self) -> list:
         return [self.fixtures_dir / name for name in self.recent_fixtures]
 
+    @property
+    def examples_baseline_path(self) -> Path:
+        """Every Open Examples tab and project name, recorded from
+        production by tools/capture_examples.py."""
+        return self.fixtures_dir / "examples.json"
+
 
 PY_VEX = "from vex import *"
 CPP_VEX = '#include "vex.h"'
@@ -166,13 +172,34 @@ def _with_captured_fixtures(cfg: SiteConfig) -> SiteConfig:
     return replace(cfg, open_fixtures=data["open"], recent_fixtures=tuple(data["recent"]))
 
 
-def site_for_url(url: str) -> SiteConfig:
+def site_by_name(name: str) -> SiteConfig:
+    """Look a site up by its short key ("v5", "123", "go", "exp", "iq")
+    or its production host ("codev5.vex.com")."""
+    name = name.strip().lower()
+    for host, cfg in SITES.items():
+        if name in (cfg.key, host):
+            return _with_captured_fixtures(cfg)
+    known = ", ".join(cfg.key for cfg in SITES.values())
+    raise KeyError(f"Unknown site {name!r}. Use one of: {known}.")
+
+
+def site_for_url(url: str, override: Optional[str] = None) -> SiteConfig:
+    """Settings for the site at `url`.
+
+    `override` (from --site / VEX_SITE) names the product directly, for a
+    test build whose URL doesn't reveal it -- e.g. codev5-staging.vex.com,
+    an IP address, or a preview host. Without it the product is worked out
+    from the host: its production host, or any subdomain of it
+    (staging.codev5.vex.com)."""
+    if override:
+        return site_by_name(override)
     host = urlparse(url).hostname or ""
-    # staging.codev5.vex.com etc. share their product's settings
     for known, cfg in SITES.items():
         if host == known or host.endswith("." + known):
             return _with_captured_fixtures(cfg)
+    known_keys = ", ".join(cfg.key for cfg in SITES.values())
     raise KeyError(
-        f"No site settings for {host!r}. Add a SiteConfig for it in sites.py "
-        f"(known: {', '.join(SITES)})."
+        f"Can't tell which VEXcode product {host!r} is. For a test build, pass "
+        f"--site=<{known_keys.replace(', ', '|')}> (or set VEX_SITE); for a new "
+        f"product, add a SiteConfig for it in sites.py."
     )

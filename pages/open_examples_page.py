@@ -117,6 +117,37 @@ class OpenExamplesPage(BasePage):
             pass
         return self.project_cards.count()
 
+    def tab_names(self) -> list:
+        """The category tabs actually shown in the filter bar, in order."""
+        expect(self.filterbar.locator(".filterbutton").first).to_be_visible(timeout=10000)
+        return [t.strip() for t in self.filterbar.locator(".filterbutton").all_inner_texts()]
+
+    def card_names(self) -> list:
+        """Names of every card in the current tab, in grid order. Waits for
+        the card count to stop changing first, so a grid that's still
+        filling in isn't read half-way."""
+        self.visible_card_count()
+        previous, stable_reads = -1, 0
+        for _ in range(20):
+            count = self.project_cards.count()
+            stable_reads = stable_reads + 1 if count == previous else 0
+            if stable_reads >= 2:
+                break
+            previous = count
+            self.page.wait_for_timeout(250)
+        return [n.strip() for n in self.project_cards.locator(".label").all_inner_texts()]
+
+    def catalog(self) -> dict:
+        """Every tab and the example names under it: {tab: [names]}, in
+        on-screen order. Ends with the "All" tab selected again."""
+        result = {}
+        for tab in self.tab_names():
+            self.click_category(tab)
+            result[tab] = self.card_names()
+        if "All" in result:
+            self.click_category("All")
+        return result
+
     def template_names(self) -> set:
         """Names of the examples under the Templates tab ("" set if the
         product has no Templates tab). Leaves the "All" tab selected."""
