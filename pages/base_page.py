@@ -83,4 +83,5 @@ class BasePage:
         handler fires first, closes the popup, and the manual click then
         waits 30s for a Close button that's gone."""
         self.auto_dismiss_whats_new()
-        expect(self.page.get_by_text("File", exact=True)).to_be_visible(timeout=30000)
+        # 60s: confirmed (2026-11-25, 123) that a slow load can take over 30s.
+        expect(self.page.get_by_text("File", exact=True)).to_be_visible(timeout=60000)

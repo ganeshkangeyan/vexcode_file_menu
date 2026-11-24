@@ -208,8 +208,8 @@ def pytest_runtest_makereport(item, call):
     showing at the moment of failure and embed it directly in the
     pytest-html report (run with --html=report.html --self-contained-html).
 
-    Only fires for the "call" phase (the actual test body, not setup/
-    teardown) and only when the test failed -- a passing test gets no
+    Fires for the setup and "call" phases (fixture setup, e.g. the site
+    loading, and the test body -- not teardown) and only when they failed -- a passing test gets no
     screenshot, keeping the report small. Reads the `page` fixture straight
     out of the failed test's own funcargs, so this works for every test
     using the `file_menu`/`page` fixtures without each test needing to do
@@ -218,7 +218,10 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
-    if report.when != "call" or not report.failed:
+    # Setup too: a site that never finished loading (slow, or a Cloudflare
+    # check page) fails in the file_menu fixture, and the picture is the
+    # quickest way to tell which.
+    if report.when not in ("setup", "call") or not report.failed:
         return
 
     page = item.funcargs.get("page")

@@ -239,38 +239,74 @@ in this suite:**
   fixture content checks) are still Chromium/Edge-only until a
   non-clipboard fallback is written for other engines.
 
-## Jenkins / CI invocation
+## Jenkins
 
-Combine site, marker, and browser selection into one command a Jenkins job
-parameterizes (e.g. string parameters `SITES`, `SUITE`, `BROWSER`):
+The repo has a ready `Jenkinsfile`. It sets up Python and calls
+`tools/run_ci.py`, which runs the selected sites **one after another** and
+writes one report set per site to `reports/`.
+
+### Build parameters
+
+| Parameter | Default (used by the nightly schedule) | Meaning |
+|---|---|---|
+| `SITES` | `all` | `all`, or a comma list of `v5, 123, go, exp, iq` |
+| `TEST_URL` | *(empty)* | A test-build URL to run instead of production. Set `SITES` to exactly that product. |
+| `BROWSER` | `chromium` | `chromium` or `msedge` (Firefox isn't offered: VEXcode refuses to run in it) |
+| `MARKERS` | *(empty = everything)* | A pytest `-m` expression, e.g. `save or save_as` |
+
+The schedule is weekday nights around 1 AM (`cron('H 1 * * 1-5')`) with the
+defaults, so all five production sites in Chromium. A full run takes
+about 1.5 hours.
+
+### Results
+
+- **Test Results** page: every test, prefixed by site (`v5.tests.test_open...`,
+  `iq.tests.test_open...`), so the same test on different sites shows
+  separately, with history across builds.
+- **Build Artifacts**: `reports/<site>.html` (a screenshot embedded for every
+  failure) and `reports/<site>.log` (full pytest output).
+- **Build status**: SUCCESS when everything passed; UNSTABLE when some
+  tests failed; FAILED when a run couldn't happen at all (bad parameter, a
+  marker that matches nothing, Python/browser setup broken).
+
+### One-time setup
+
+1. **Agent.** The browsers must run **headed**, because Cloudflare in front of the VEXcode
+   sites blocks headless Chrome.
+   - *Windows agent*: Python 3.10+ on PATH. Run the Jenkins agent in a
+     logged-in desktop session (e.g. auto-logon + agent started at login),
+     **not** as a Windows service: a service has no desktop to draw the
+     browser on.
+   - *Linux agent*: Python 3.10+, `apt-get install xvfb`, and once as root
+     `python3 -m playwright install-deps chromium`. The Jenkinsfile runs
+     the tests inside `xvfb-run` (a virtual screen) automatically.
+   - For `BROWSER=msedge`, Microsoft Edge must be installed on the agent.
+   - Give that agent the label **`vexcode-ui`** (or change `agent { label ... }`
+     in the Jenkinsfile).
+
+   The alternative to headed runs is asking VEX to allow-list the agent's IP
+   in Cloudflare, then setting `VEX_HEADLESS=1` in the Jenkinsfile's
+   `environment` block. Don't try to disguise headless Chrome as a real
+   browser.
+2. **Job.** New Item → *Pipeline* → "Pipeline script from SCM" → Git, this repo,
+   branch `main`, script path `Jenkinsfile`. Add credentials if the repo is
+   private.
+3. **Parameters.** Click *Build Now* once. Jenkins only learns the parameters
+   and the schedule from the Jenkinsfile after its first run, so that run
+   uses the defaults. *Build with Parameters* appears afterwards.
+
+Plugins used: Pipeline, Git, JUnit (all in Jenkins' suggested set).
+
+### Same thing from a terminal
 
 ```bash
-pytest \
-  -m "${SUITE}" \
-  --sites="${SITES}" \
-  --browser=chromium \
-  --html=report.html --self-contained-html
+python tools/run_ci.py                                    # all sites
+python tools/run_ci.py --sites=v5,iq --markers="save or save_as"
+python tools/run_ci.py --sites=v5 --test-url=https://codev5-staging.vex.com/
+python tools/run_ci.py --browser=msedge
 ```
 
-Example concrete invocations:
-
-```bash
-# Save/Save As only, against two sites, Chromium
-pytest -m save_as --sites="https://codev5.vex.com/,https://code123.vex.com/" \
-  --html=report.html --self-contained-html
-
-# Everything, single site, Edge
-pytest --sites="https://codev5.vex.com/" --browser=chromium \
-  --browser-channel=msedge --html=report.html --self-contained-html
-
-# A test build whose URL doesn't show the product (Jenkins params BUILD_URL, PRODUCT)
-VEX_SLOWMO=1 pytest --base-url="${BUILD_URL}" --site="${PRODUCT}" \
-  --html=report.html --self-contained-html
-```
-
-A screenshot is auto-attached to `report.html` for any failing test (see
-`pytest_runtest_makereport` in `conftest.py`) -- useful as a build artifact
-in Jenkins even without further wiring.
+Or call pytest directly, as in the sections above, for one-off runs.
 
 ## What's covered
 
@@ -297,6 +333,8 @@ conftest.py                    # fixtures: browser/page, project_name, site, fil
 sites.py                       # per-site settings (extensions, languages, examples, fixtures)
 tools/capture_fixtures.py      # captures real fixture files from a site
 tools/capture_examples.py      # records production's Open Examples catalog (examples.json)
+tools/run_ci.py                # CI runner used by the Jenkinsfile (sites one by one, per-site reports)
+Jenkinsfile                    # scheduled + parameterized Jenkins pipeline
 pages/
   base_page.py                  # shared BasePage (wait_until_loaded)
   file_menu_page.py             # FileMenuPage, NewProjectLanguageDialog,
